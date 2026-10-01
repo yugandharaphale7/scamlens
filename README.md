@@ -74,7 +74,7 @@ Never put the key in client-side code, commit it, or upload it in a message. If 
 ## Environment variables
 
 - `GEMINI_API_KEY` — optional server-side Gemini API key.
-- `GEMINI_MODEL` — optional model name; defaults to `gemini-2.0-flash`.
+- `GEMINI_MODEL` — optional model name; defaults to `gemini-3.5-flash`.
 
 `.env`, `.env.local`, credentials, tokens, temporary uploads, and build output are ignored by Git.
 
