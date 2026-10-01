@@ -9,7 +9,7 @@ export const runtime = "nodejs";
 const MAX_TEXT = 18000;
 const MAX_PAGE_BYTES = 120000;
 const MAX_IMAGE_BYTES = 5_000_000;
-const modelName = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
