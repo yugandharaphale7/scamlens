@@ -10,6 +10,8 @@ const MAX_TEXT = 18000;
 const MAX_PAGE_BYTES = 120000;
 const MAX_IMAGE_BYTES = 5_000_000;
 const modelName = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+const GEMINI_TIMEOUT_MS = 12000;
+const GEMINI_MAX_ATTEMPTS = 2;
 
 function jsonError(message: string, status = 400) {
   return NextResponse.json({ error: message }, { status });
@@ -101,21 +103,52 @@ function promptFor(language: OutputLanguage, content: string, sourceDescription:
   return `You are ScamLens, an investor-safety and financial-content-literacy assistant for Indian retail investors. Analyze the supplied ${sourceDescription} and return ONLY valid JSON, with no markdown fences, matching this shape: {"attention_level":"HIGH|MEDIUM|LOW","summary":"string","detected_language":"string","indicators":[{"category":"string","severity":"HIGH|MEDIUM|LOW","evidence":"exact quote from content","explanation":"simple explanation","verification_action":"safe verification step"}],"claims":[{"claim":"individual claim","entity":"entity or Not independently identified","status":"VERIFIED|UNVERIFIED|UNCLEAR|NOT_CHECKED","evidence":"exact content or No evidence","source":"actual source used or No external source checked"}],"manipulation_tactics":[{"type":"urgency|greed|fear|authority|scarcity|social_proof|other","evidence":"exact quote","explanation":"educational explanation"}],"recommended_verification_steps":["string"],"safety_notice":"string"}. Explain in ${languageName}. Never provide BUY, SELL, HOLD, stock-price predictions, return predictions, portfolio recommendations, broker or financial-product recommendations, or encouragement to speculate. Do not say fraud or scam is proven. Use uncertainty-aware language. Do not invent a source, URL, regulator approval, or verification result. Only mark a claim VERIFIED when actual authoritative evidence is present; otherwise use UNVERIFIED, UNCLEAR, or NOT_CHECKED. Never ask the user for OTPs, passwords, PINs, bank credentials, or card details. A warning sign is a reason to verify, not proof by itself. Content:\n${content}`;
 }
 
+function isRetryableGeminiStatus(status: number) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
 async function callGemini(prompt: string, image?: { mimeType: string; data: string }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) return null;
   const parts: Array<Record<string, unknown>> = [{ text: prompt }];
   if (image) parts.push({ inline_data: { mime_type: image.mimeType, data: image.data } });
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.1, responseMimeType: "application/json" } }),
-  });
-  if (!response.ok) throw new Error("AI request failed");
-  const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-  const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("").trim();
-  if (!text) throw new Error("AI response was empty");
-  return JSON.parse(stripCodeFence(text));
+  let lastError = "AI request failed";
+  for (let attempt = 0; attempt < GEMINI_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+    try {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(key)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.1, responseMimeType: "application/json" } }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        lastError = `Gemini ${response.status}`;
+        if (!isRetryableGeminiStatus(response.status) || attempt === GEMINI_MAX_ATTEMPTS - 1) {
+          throw new Error(`${lastError}: ${detail.slice(0, 240)}`);
+        }
+      } else {
+        const data = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+        const text = data.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("").trim();
+        if (!text) throw new Error("AI response was empty");
+        try {
+          return JSON.parse(stripCodeFence(text));
+        } catch {
+          lastError = "Gemini returned invalid JSON";
+          if (attempt === GEMINI_MAX_ATTEMPTS - 1) throw new Error(lastError);
+        }
+      }
+    } catch (error) {
+      lastError = error instanceof Error && error.name === "AbortError" ? "Gemini request timed out" : error instanceof Error ? error.message : lastError;
+      if (attempt === GEMINI_MAX_ATTEMPTS - 1 || (!lastError.includes("429") && !lastError.includes("5") && !lastError.includes("timed out") && !lastError.includes("fetch"))) throw new Error(lastError);
+    } finally {
+      clearTimeout(timer);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 450 * (attempt + 1)));
+  }
+  throw new Error(lastError);
 }
 
 export async function POST(request: Request) {
@@ -134,7 +167,7 @@ export async function POST(request: Request) {
         if (!result) return NextResponse.json(localAnalyze(text, language, "limited"));
         return NextResponse.json(result);
       } catch {
-        return NextResponse.json({ error: "Live AI analysis is temporarily unavailable. Please try again or use a Demo Scenario." }, { status: 502 });
+        return NextResponse.json({ ...localAnalyze(text, language, "limited"), fallback_reason: "Live AI was temporarily unavailable, so ScamLens used its limited local safety check instead." });
       }
     }
 
@@ -152,7 +185,7 @@ export async function POST(request: Request) {
         if (!result) return NextResponse.json(localAnalyze(page.text, language, "limited"));
         return NextResponse.json({ ...result, extracted_content: page.text, source_url: parsed.toString() });
       } catch {
-        return NextResponse.json({ error: "Live AI analysis is temporarily unavailable. The webpage was retrieved but could not be safely summarized." }, { status: 502 });
+        return NextResponse.json({ ...localAnalyze(page.text, language, "limited"), extracted_content: page.text, source_url: parsed.toString(), fallback_reason: "Live AI was temporarily unavailable, so ScamLens used its limited local safety check instead." });
       }
     }
 
