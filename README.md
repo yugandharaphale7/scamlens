@@ -69,7 +69,7 @@ cp .env.example .env.local
 # edit .env.local and set GEMINI_API_KEY=...
 ```
 
-Never put the key in client-side code, commit it, or upload it in a message. If the key is missing, Demo Scenario mode still works and text/URL input may show a clearly labeled limited local analysis. Screenshot analysis requires a live key.
+Never put the key in client-side code, commit it, or upload it in a message. If Gemini has a temporary timeout, rate limit, or server error, ScamLens retries once and then returns a clearly labeled limited local safety check for text and URL input instead of failing the whole analysis. If the key is missing, Demo Scenario mode still works and text/URL input shows the same limited local analysis. Screenshot analysis requires a live key.
 
 ## Environment variables
 
